@@ -1,23 +1,4 @@
-`timescale 1ns / 1ps
-//////////////////////////////////////////////////////////////////////////////////
-// Company: 
-// Engineer: 
-// 
-// Create Date: 05/02/2026 10:47:26 PM
-// Design Name: 
-// Module Name: resize_maxpooling
-// Project Name: 
-// Target Devices: 
-// Tool Versions: 
-// Description: 
-// 
-// Dependencies: 
-// 
-// Revision:
-// Revision 0.01 - File Created
-// Additional Comments:
-// 
-//////////////////////////////////////////////////////////////////////////////////
+
 module resize_maxpooling #(
     parameter ADDR_WIDTH_BASE = 24,
 
@@ -383,6 +364,22 @@ module resize_maxpooling #(
     reg        q_src_last_reg;
     reg        q_src_last_next;
 
+    // Registered quantization multiplier split into 16-bit pieces.
+    //
+    // scale_inf_mult_reg is signed 32-bit:
+    //   mult = mult_lo + (mult_hi <<< 16)
+    //
+    // where:
+    //   mult_lo = unsigned lower 16 bits
+    //   mult_hi = signed upper 16 bits
+    //
+    // Splitting 9x32 multiplication into two 9x16 multiplications
+    // avoids a wide DSP cascade / PCIN critical path at 200 MHz.
+    reg [15:0]         q_src_mult_lo_reg;
+    reg [15:0]         q_src_mult_lo_next;
+    reg signed [15:0]  q_src_mult_hi_reg;
+    reg signed [15:0]  q_src_mult_hi_next;
+
     // ============================================================
     // Parallel quantizer pipeline for R/G/B
     //
@@ -396,11 +393,11 @@ module resize_maxpooling #(
     // Since FIFO has no full/ready, this pipeline has no backpressure.
     // ============================================================
 
-    reg [4:0] q_valid_reg;
-    reg [4:0] q_valid_next;
+    reg [5:0] q_valid_reg;
+    reg [5:0] q_valid_next;
 
-    reg [4:0] q_last_reg;
-    reg [4:0] q_last_next;
+    reg [5:0] q_last_reg;
+    reg [5:0] q_last_next;
 
     // Stage registers for R
     reg signed [40:0] qr_stage1_reg, qr_stage1_next;
@@ -431,13 +428,71 @@ module resize_maxpooling #(
     assign q_g_pixel_s = $signed({1'b0, q_src_g8_reg});
     assign q_b_pixel_s = $signed({1'b0, q_src_b8_reg});
 
+    // ============================================================
+    // Split multiplier stage
+    // ============================================================
+    //
+    // Instead of:
+    //   pixel_u8 * signed_32bit_multiplier
+    //
+    // use:
+    //   lo_prod = pixel_u8 * mult[15:0]
+    //   hi_prod = pixel_u8 * signed(mult[31:16])
+    //   product = lo_prod + (hi_prod <<< 16)
+    //
+    // This is mathematically equivalent, but maps to narrower DSP
+    // multipliers and removes the DSP cascade path reported as PCIN.
+    // ============================================================
+
+    reg signed [25:0] qr_prod_lo_reg, qr_prod_lo_next;
+    reg signed [25:0] qg_prod_lo_reg, qg_prod_lo_next;
+    reg signed [25:0] qb_prod_lo_reg, qb_prod_lo_next;
+
+    reg signed [24:0] qr_prod_hi_reg, qr_prod_hi_next;
+    reg signed [24:0] qg_prod_hi_reg, qg_prod_hi_next;
+    reg signed [24:0] qb_prod_hi_reg, qb_prod_hi_next;
+
+    wire signed [25:0] qr_prod_lo_d;
+    wire signed [25:0] qg_prod_lo_d;
+    wire signed [25:0] qb_prod_lo_d;
+
+    wire signed [24:0] qr_prod_hi_d;
+    wire signed [24:0] qg_prod_hi_d;
+    wire signed [24:0] qb_prod_hi_d;
+
+    // Low part is unsigned 16-bit, extend with 0 before signed multiply.
+    assign qr_prod_lo_d = q_r_pixel_s * $signed({1'b0, q_src_mult_lo_reg});
+    assign qg_prod_lo_d = q_g_pixel_s * $signed({1'b0, q_src_mult_lo_reg});
+    assign qb_prod_lo_d = q_b_pixel_s * $signed({1'b0, q_src_mult_lo_reg});
+
+    // High part is signed 16-bit.
+    assign qr_prod_hi_d = q_r_pixel_s * q_src_mult_hi_reg;
+    assign qg_prod_hi_d = q_g_pixel_s * q_src_mult_hi_reg;
+    assign qb_prod_hi_d = q_b_pixel_s * q_src_mult_hi_reg;
+
     wire signed [40:0] qr_stage1_d;
     wire signed [40:0] qg_stage1_d;
     wire signed [40:0] qb_stage1_d;
 
-    assign qr_stage1_d = q_r_pixel_s * scale_inf_mult_reg;
-    assign qg_stage1_d = q_g_pixel_s * scale_inf_mult_reg;
-    assign qb_stage1_d = q_b_pixel_s * scale_inf_mult_reg;
+    wire signed [40:0] qr_lo_ext;
+    wire signed [40:0] qg_lo_ext;
+    wire signed [40:0] qb_lo_ext;
+
+    wire signed [40:0] qr_hi_shift;
+    wire signed [40:0] qg_hi_shift;
+    wire signed [40:0] qb_hi_shift;
+
+    assign qr_lo_ext = {{15{1'b0}}, qr_prod_lo_reg};
+    assign qg_lo_ext = {{15{1'b0}}, qg_prod_lo_reg};
+    assign qb_lo_ext = {{15{1'b0}}, qb_prod_lo_reg};
+
+    assign qr_hi_shift = $signed({{16{qr_prod_hi_reg[24]}}, qr_prod_hi_reg}) <<< 16;
+    assign qg_hi_shift = $signed({{16{qg_prod_hi_reg[24]}}, qg_prod_hi_reg}) <<< 16;
+    assign qb_hi_shift = $signed({{16{qb_prod_hi_reg[24]}}, qb_prod_hi_reg}) <<< 16;
+
+    assign qr_stage1_d = qr_lo_ext + qr_hi_shift;
+    assign qg_stage1_d = qg_lo_ext + qg_hi_shift;
+    assign qb_stage1_d = qb_lo_ext + qb_hi_shift;
 
     wire signed [40:0] round_value;
 
@@ -510,8 +565,8 @@ module resize_maxpooling #(
     wire q_out_valid;
     wire q_out_last;
 
-    assign q_out_valid = q_valid_reg[4];
-    assign q_out_last  = q_last_reg[4];
+    assign q_out_valid = q_valid_reg[5];
+    assign q_out_last  = q_last_reg[5];
 
     // ============================================================
     // Sequential block
@@ -555,14 +610,21 @@ module resize_maxpooling #(
 
             pixel_result_reg    <= 16'd0;
 
-            q_valid_reg         <= 5'd0;
-            q_last_reg          <= 5'd0;
+            q_valid_reg         <= 6'd0;
+            q_last_reg          <= 6'd0;
 
             q_src_valid_reg     <= 1'b0;
             q_src_r8_reg        <= 8'd0;
             q_src_g8_reg        <= 8'd0;
             q_src_b8_reg        <= 8'd0;
             q_src_last_reg      <= 1'b0;
+
+            qr_prod_lo_reg      <= 26'sd0;
+            qg_prod_lo_reg      <= 26'sd0;
+            qb_prod_lo_reg      <= 26'sd0;
+            qr_prod_hi_reg      <= 25'sd0;
+            qg_prod_hi_reg      <= 25'sd0;
+            qb_prod_hi_reg      <= 25'sd0;
 
             qr_stage1_reg       <= 41'sd0;
             qr_stage2_reg       <= 41'sd0;
@@ -626,6 +688,15 @@ module resize_maxpooling #(
             q_src_g8_reg        <= q_src_g8_next;
             q_src_b8_reg        <= q_src_b8_next;
             q_src_last_reg      <= q_src_last_next;
+            q_src_mult_lo_reg   <= q_src_mult_lo_next;
+            q_src_mult_hi_reg   <= q_src_mult_hi_next;
+
+            qr_prod_lo_reg      <= qr_prod_lo_next;
+            qg_prod_lo_reg      <= qg_prod_lo_next;
+            qb_prod_lo_reg      <= qb_prod_lo_next;
+            qr_prod_hi_reg      <= qr_prod_hi_next;
+            qg_prod_hi_reg      <= qg_prod_hi_next;
+            qb_prod_hi_reg      <= qb_prod_hi_next;
 
             qr_stage1_reg       <= qr_stage1_next;
             qr_stage2_reg       <= qr_stage2_next;
@@ -930,18 +1001,31 @@ module resize_maxpooling #(
         // Register the FSM-selected quantizer input before the multiplier.
         // These assignments must be after the case statement so q_in_* has
         // already been selected by S_Q_FEED/S_PAD_FEED.
-        q_src_valid_next = q_in_valid;
-        q_src_r8_next    = q_in_r8;
-        q_src_g8_next    = q_in_g8;
-        q_src_b8_next    = q_in_b8;
-        q_src_last_next  = q_in_last;
+        q_src_valid_next  = q_in_valid;
+        q_src_r8_next     = q_in_r8;
+        q_src_g8_next     = q_in_g8;
+        q_src_b8_next     = q_in_b8;
+        q_src_last_next   = q_in_last;
+        q_src_mult_lo_next = scale_inf_mult_reg[15:0];
+        q_src_mult_hi_next = scale_inf_mult_reg[31:16];
 
-        // q_src_* is already registered, so the DSP multiplier no longer
-        // has state_reg in its input path. This adds 1 cycle latency but
-        // removes the failing high-fanout state_reg -> DSP PCIN path.
-        q_valid_next = {q_valid_reg[3:0], q_src_valid_reg};
-        q_last_next  = {q_last_reg[3:0],  q_src_last_reg};
+        // Valid pipeline:
+        //   q_src_valid_reg -> partial products -> full product
+        //   -> round -> shift -> zp -> clamp/output
+        q_valid_next = {q_valid_reg[4:0], q_src_valid_reg};
+        q_last_next  = {q_last_reg[4:0],  q_src_last_reg};
 
+        // Stage A: two narrow multipliers per channel.
+        // This replaces one wide 9x32 multiplication.
+        qr_prod_lo_next = qr_prod_lo_d;
+        qg_prod_lo_next = qg_prod_lo_d;
+        qb_prod_lo_next = qb_prod_lo_d;
+
+        qr_prod_hi_next = qr_prod_hi_d;
+        qg_prod_hi_next = qg_prod_hi_d;
+        qb_prod_hi_next = qb_prod_hi_d;
+
+        // Stage B: add shifted high partial and low partial.
         qr_stage1_next = qr_stage1_d;
         qr_stage2_next = qr_stage2_d;
         qr_stage3_next = qr_stage3_d;
