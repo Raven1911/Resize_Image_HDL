@@ -478,34 +478,75 @@ module resize_maxpooling #(
         (qb_stage2_reg >>> scale_inf_mult_shift_reg) :
         qb_stage2_reg;
 
-    // Stage 4: add zero point
+    // // Stage 4: add zero point
+    // wire signed [40:0] qr_stage4_d;
+    // wire signed [40:0] qg_stage4_d;
+    // wire signed [40:0] qb_stage4_d;
+
+    // assign qr_stage4_d = qr_stage3_reg + {{33{zp_i[7]}}, zp_i};
+    // assign qg_stage4_d = qg_stage3_reg + {{33{zp_i[7]}}, zp_i};
+    // assign qb_stage4_d = qb_stage3_reg + {{33{zp_i[7]}}, zp_i};
+
+    // ============================================================
+    // Stage 4: ADD ZERO POINT
+    // ============================================================
+    //
+    // zp_i là signed int8.
+    // Cần sign-extend lên signed 41-bit trước khi cộng.
+    //
+    // Nếu viết trực tiếp:
+    //     {{33{zp_i[7]}}, zp_i}
+    // Vivado có thể coi concat này là unsigned,
+    // gây critical warning mixed signed/unsigned.
+    //
+
+    wire signed [40:0] zp_ext_41;
+
+    assign zp_ext_41 = $signed({{33{zp_i[7]}}, zp_i});
+
     wire signed [40:0] qr_stage4_d;
     wire signed [40:0] qg_stage4_d;
     wire signed [40:0] qb_stage4_d;
 
-    assign qr_stage4_d = qr_stage3_reg + {{33{zp_i[7]}}, zp_i};
-    assign qg_stage4_d = qg_stage3_reg + {{33{zp_i[7]}}, zp_i};
-    assign qb_stage4_d = qb_stage3_reg + {{33{zp_i[7]}}, zp_i};
+    assign qr_stage4_d = qr_stage3_reg + zp_ext_41;
+    assign qg_stage4_d = qg_stage3_reg + zp_ext_41;
+    assign qb_stage4_d = qb_stage3_reg + zp_ext_41;
 
     // Stage 5: clamp to signed int8 [-128, 127]
     wire signed [7:0] qr_stage5_d;
     wire signed [7:0] qg_stage5_d;
     wire signed [7:0] qb_stage5_d;
 
-    assign qr_stage5_d =
-        ((|qr_stage4_reg[40:7]) && !(&qr_stage4_reg[40:7])) ?
-            (qr_stage4_reg[40] ? -8'sd128 : 8'sd127) :
-            qr_stage4_reg[7:0];
+    // assign qr_stage5_d =
+    //     ((|qr_stage4_reg[40:7]) && !(&qr_stage4_reg[40:7])) ?
+    //         (qr_stage4_reg[40] ? -8'sd128 : 8'sd127) :
+    //         qr_stage4_reg[7:0];
 
+    // assign qg_stage5_d =
+    //     ((|qg_stage4_reg[40:7]) && !(&qg_stage4_reg[40:7])) ?
+    //         (qg_stage4_reg[40] ? -8'sd128 : 8'sd127) :
+    //         qg_stage4_reg[7:0];
+
+    // assign qb_stage5_d =
+    //     ((|qb_stage4_reg[40:7]) && !(&qb_stage4_reg[40:7])) ?
+    //         (qb_stage4_reg[40] ? -8'sd128 : 8'sd127) :
+    //         qb_stage4_reg[7:0];
+
+
+    assign qr_stage5_d =
+    ((|qr_stage4_reg[40:7]) && !(&qr_stage4_reg[40:7])) ?
+        (qr_stage4_reg[40] ? -8'sd128 : 8'sd127) :
+        $signed(qr_stage4_reg[7:0]);
+    
     assign qg_stage5_d =
-        ((|qg_stage4_reg[40:7]) && !(&qg_stage4_reg[40:7])) ?
-            (qg_stage4_reg[40] ? -8'sd128 : 8'sd127) :
-            qg_stage4_reg[7:0];
+    ((|qg_stage4_reg[40:7]) && !(&qg_stage4_reg[40:7])) ?
+        (qg_stage4_reg[40] ? -8'sd128 : 8'sd127) :
+        $signed(qg_stage4_reg[7:0]);
 
     assign qb_stage5_d =
         ((|qb_stage4_reg[40:7]) && !(&qb_stage4_reg[40:7])) ?
             (qb_stage4_reg[40] ? -8'sd128 : 8'sd127) :
-            qb_stage4_reg[7:0];
+            $signed(qb_stage4_reg[7:0]);
 
     wire q_out_valid;
     wire q_out_last;
